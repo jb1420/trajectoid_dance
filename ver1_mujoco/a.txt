@@ -1,0 +1,115 @@
+● 전체 워크플로우                                                                                                                                                                                                                                       
+  전제 조건 — 라이브러리 설치                                                                                               
+                                                                                                                              pip install mujoco simple-pid trimesh manifold3d coacd tqdm                                                               
+                                                                                                                            
+  ---
+  Step 0: 경로(Path) 데이터 준비
+
+  트레젝토이드는 특정 2D 경로에 맞춰 형태가 결정됩니다.
+
+  옵션 A — step4_control.py에 내장된 경로 사용 (가장 간단)
+
+  step4_control.py 상단 SETTINGS에서 경로 선택:
+  PATH_TYPE  = 'circle'      # 'sinusoid' | 'figure8' | 'lemniscate' | 'circle'
+  PATH_SCALE = 0.15          # 경로 진폭 (m), PLATE_HALF=0.25 보다 작게
+
+  옵션 B — path_data.npy 파일 사용 (커스텀 경로)
+
+  step1_boolean_subtraction.py에서:
+  INPUT_MODE     = 'generate'
+  PATH_DATA_FILE = 'your_path/path_data.npy'   # (N, 2) ndarray, 알고리즘 단위
+
+  ---
+  Step 1: 트레젝토이드 메쉬 생성
+
+  python step1_boolean_subtraction.py
+
+  step1_boolean_subtraction.py 주요 설정:
+  INPUT_MODE   = 'generate'        # 경로에서 실시간 생성
+  # 또는
+  INPUT_MODE   = 'load_boxes'      # 기존 cutting_boxes .obj 폴더에서 로드
+  OUTER_RADIUS = 1.25              # outer sphere 반지름 (1 = CORE_R = 12.7mm)
+
+  완료 후 생성되는 파일:
+  output/trajectoid.obj   ← Step 2/3/4에서 사용
+  output/trajectoid.stl   ← 3D 프린팅용
+
+  소요 시간: 경로 점 수에 따라 1~5분 (Boolean 연산)
+
+  ---
+  Step 2: 시뮬레이션 실행
+
+  python step4_control.py
+
+  step4_control.py SETTINGS 설명
+
+  OBJECT_TYPE  = 'trajectoid'   # 'sphere' | 'trajectoid'
+
+  # 경로 (평판 위에 시각화되는 경로)
+  PATH_TYPE    = 'circle'       # 시뮬레이션 경로 형태
+  PATH_SCALE   = 0.15           # 경로 크기 (m)
+
+  # 속도 PID
+  TARGET_SPEED = 0.025          # 목표 구름 속도 (m/s = 25mm/s)
+  SPEED_KP     = 2.0            # 빠른 반응
+  SPEED_KI     = 0.05           # 적분 누적 보정
+  SPEED_KD     = 0.30           # 진동 억제
+  TILT_MIN     = 0.005          # 최소 기울기 (정지 방지)
+  TILT_MAX     = PLATE_MAX_TILT * 0.8   # 최대 기울기
+
+  실행 흐름
+
+  [BallPlateEnv] MJCF 생성 중 …
+    [CoACD] 메쉬 로딩 및 스케일 적용 중 …          ← output/trajectoid.obj 로드
+    [CoACD] 볼록 분해 시작 … (threshold=0.05)      ← 약 10~30초
+    [CoACD] 24 개 볼록 조각 생성
+    [BallPlateEnv] 초기화 완료
+
+    시뮬레이션 시작 (뷰어 창 q=종료)
+
+      step    t(s)   ball_x(mm)   ball_y(mm)   speed(mm/s)   tilt(°)   cross_err(mm)
+    ──────────────────────────────────────────────────────────────────────────────────
+         0    0.00       +0.0         +0.0          0.0        0.29          +0.0
+       200    0.16       +5.2        +12.1         18.3        0.91          -1.2
+       400    0.32      +12.8        +22.4         24.7        0.31          +0.5
+      ...
+
+  ---
+  파라미터 튜닝 가이드
+
+  ┌───────────────────────────┬─────────────────────────────────────────────┐
+  │           증상             │                    조정                     │
+  ├───────────────────────────┼─────────────────────────────────────────────┤
+  │ 너무 느리게 구름           │ TARGET_SPEED ↑                              │
+  ├───────────────────────────┼─────────────────────────────────────────────┤
+  │ 속도가 흔들림              │ SPEED_KD ↑                                  │
+  ├───────────────────────────┼─────────────────────────────────────────────┤
+  │ 속도 수렴이 느림           │ SPEED_KP ↑                                  │
+  ├───────────────────────────┼─────────────────────────────────────────────┤
+  │ 경로를 너무 많이 이탈      │ PATH_SCALE ↓ (경로 작게)                    │
+  ├───────────────────────────┼─────────────────────────────────────────────┤
+  │ 평판 가장자리로 자꾸 이탈   │ TARGET_SPEED ↓ 또는 TILT_MAX ↓              │
+  ├───────────────────────────┼─────────────────────────────────────────────┤
+  │ CoACD 너무 거칠게 분해     │ step2_3_mujoco_env.py에서 COACD_THRESHOLD ↓ │
+  └───────────────────────────┴─────────────────────────────────────────────┘
+
+  ---
+  전체 순서 요약
+
+  1. pip install ...                  # 라이브러리 설치
+
+  2. (선택) PATH_DATA_FILE 준비        # 커스텀 경로
+
+  3. python step1_boolean_subtraction.py
+     → output/trajectoid.obj 생성     # 1~5분
+
+  4. step4_control.py SETTINGS 편집   # PATH_TYPE, TARGET_SPEED 등
+
+  5. python step4_control.py
+     → MuJoCo 뷰어 + 터미널 로그      # CoACD 후 시뮬레이션 시작
+
+  참고: Step 1과 Step 4의 경로는 별개입니다.
+  - Step 1의 경로 → 트레젝토이드 형태 결정 (물리적으로 따라가는 경로)
+  - Step 4의 PATH_TYPE → 평판 위 시각화 경로 (제어 기준점)
+
+  트레젝토이드가 정확히 경로를 따르려면 두 경로가 동일해야 합니다.

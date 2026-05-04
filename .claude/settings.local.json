@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(C:/Python313/python.exe -c \"import mujoco; print\\(mujoco.__version__\\)\" 2>&1)",
+      "Bash(C:/Python313/python.exe -c \"import simple_pid; print\\('simple_pid ok'\\)\" 2>&1 && C:/Python313/python.exe -c \"import trimesh; print\\('trimesh', trimesh.__version__\\)\" 2>&1)",
+      "Bash(C:/Python313/python.exe -c \"import trimesh; print\\('trimesh', trimesh.__version__\\); import numpy; print\\('numpy', numpy.__version__\\)\" 2>&1)",
+      "Bash(python:*)",
+      "Bash(grep -E \"\\\\.\\(py|txt|toml|cfg|ini|md\\)$\")",
+      "PowerShell($env:PYTHONPATH = \"c:\\\\Users\\\\jb142\\\\Desktop\\\\Code_Drive\\\\DEV\\\\SuYeah\\\\dance\"; python -c \"from dancer import Dancer, generate_dancer, normalize_sim; from presets import get_preset; d = Dancer.new\\('preset:circle', get_preset\\('circle'\\), 'Test', '#e6194b'\\); generate_dancer\\(d, resolution=64\\); print\\('verts:', d.gen_result.vertices.shape, 'faces:', d.gen_result.faces.shape, 'sim trans:', d.sim_result.translations_xyz.shape, 'rots:', d.sim_result.rotations.shape, 'cycle_arc:', round\\(d.cycle_arc_length, 3\\)\\); n = normalize_sim\\(d.sim_result, 480\\); print\\('normalized:', n.translations.shape, n.rotations.shape, n.trajectory_xy.shape\\)\")",
+      "PowerShell($env:PYTHONPATH = \"c:\\\\Users\\\\jb142\\\\Desktop\\\\Code_Drive\\\\DEV\\\\SuYeah\\\\dance\"; python -c \"import importlib; m = importlib.import_module\\('viewer'\\); print\\('viewer module loaded; HAS_GPU_VIEWER=', m.HAS_GPU_VIEWER\\)\")",
+      "PowerShell($env:PYTHONPATH = \"c:\\\\Users\\\\jb142\\\\Desktop\\\\Code_Drive\\\\DEV\\\\SuYeah\\\\dance\"; python -c \"import ast, sys; src = open\\(r'c:\\\\Users\\\\jb142\\\\Desktop\\\\Code_Drive\\\\DEV\\\\SuYeah\\\\dance\\\\app.py', encoding='utf-8'\\).read\\(\\); ast.parse\\(src\\); print\\('app.py parses OK,', src.count\\(chr\\(10\\)\\)+1, 'lines'\\)\")"
+    ]
+  }
+}
