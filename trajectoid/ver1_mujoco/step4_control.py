@@ -41,7 +41,7 @@ except ImportError:
 
 # step2_3에서 환경 클래스와 상수 임포트
 sys.path.insert(0, os.path.dirname(__file__))
-from ver1_mujoco.step2_3_mujoco_env import (
+from trajectoid.ver1_mujoco.step2_3_mujoco_env import (
     BallPlateEnv,
     PLATE_HALF, PLATE_THICK, PLATE_H,
     BALL_R, CORE_R, PLATE_MAX_TILT, TIMESTEP,

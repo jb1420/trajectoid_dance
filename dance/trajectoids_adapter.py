@@ -541,7 +541,11 @@ def build_roll_simulation(
         if ds < EPS:
             rotations[i] = rotations[i - 1]
             continue
-        axis = np.array([delta[1], -delta[0], 0.0], dtype=float)
+        # No-slip rolling: for travel direction v=(dx,dy,0) on the +z-up floor,
+        # the body rotates about axis (-dy, dx, 0) (right-hand rule applied to
+        # contact-point-stays-still constraint), giving the contact point a
+        # velocity of -v in the body frame.
+        axis = np.array([-delta[1], delta[0], 0.0], dtype=float)
         step = _rodrigues_rotation_matrix(axis, ds / core_radius)
         rotations[i] = step @ rotations[i - 1]
         achieved_roll_angle += ds / core_radius

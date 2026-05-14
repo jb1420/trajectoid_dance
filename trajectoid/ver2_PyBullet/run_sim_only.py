@@ -24,12 +24,12 @@ log = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ver2_PyBullet.config import BALL_R, SIM_DURATION
-from ver2_PyBullet.step6_pybullet_sim import (
+from trajectoid.ver2_PyBullet.config import BALL_R, SIM_DURATION
+from trajectoid.ver2_PyBullet.step6_pybullet_sim import (
     TrajectoidSimulation, PathFollowController,
 )
-from ver2_PyBullet.paths import PathSpec
-from ver2_PyBullet.verification import check_no_slip
+from trajectoid.ver2_PyBullet.paths import PathSpec
+from trajectoid.ver2_PyBullet.verification import check_no_slip
 
 
 def run_sim_only(

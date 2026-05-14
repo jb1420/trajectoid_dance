@@ -25,14 +25,14 @@ log = logging.getLogger(__name__)
 # 프로젝트 루트를 sys.path에 추가
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ver2_PyBullet.config import OUTPUT_DIR, R_SHELL_RATIO, N_S_SAMPLES, N_LAMBDA_SAMPLES
-from ver2_PyBullet.paths import PathSpec
-from ver2_PyBullet.step1_find_radius import find_optimal_radius, scan_area_function
-from ver2_PyBullet.step2_sphere_curve import generate_sphere_curve
-from ver2_PyBullet.step3_close_curve import close_curve
-from ver2_PyBullet.step4_ruled_surface import generate_ruled_surface_with_caps
-from ver2_PyBullet.step5_convex_hull_mesh import generate_mesh
-from ver2_PyBullet.verification import run_all_checks
+from trajectoid.ver2_PyBullet.config import OUTPUT_DIR, R_SHELL_RATIO, N_S_SAMPLES, N_LAMBDA_SAMPLES
+from trajectoid.ver2_PyBullet.paths import PathSpec
+from trajectoid.ver2_PyBullet.step1_find_radius import find_optimal_radius, scan_area_function
+from trajectoid.ver2_PyBullet.step2_sphere_curve import generate_sphere_curve
+from trajectoid.ver2_PyBullet.step3_close_curve import close_curve
+from trajectoid.ver2_PyBullet.step4_ruled_surface import generate_ruled_surface_with_caps
+from trajectoid.ver2_PyBullet.step5_convex_hull_mesh import generate_mesh
+from trajectoid.ver2_PyBullet.verification import run_all_checks
 
 
 def run_pipeline(
@@ -137,7 +137,7 @@ def run_pipeline(
     # ── 시뮬레이션 (옵션) ─────────────────────────────────────
     if run_sim:
         print("\n[SIM] PyBullet 시뮬레이션 시작 …")
-        from ver2_PyBullet.step6_pybullet_sim import (
+        from trajectoid.ver2_PyBullet.step6_pybullet_sim import (
             TrajectoidSimulation, PathFollowController,
         )
 

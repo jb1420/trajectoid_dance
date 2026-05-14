@@ -50,6 +50,11 @@ class Dancer:
     n_cycles: int = 1
     closed: bool = True
 
+    # Parametric preset knobs (e.g. polygon n_sides, star inner_ratio). Empty
+    # for fixed presets and for freehand. Persisted in .tdance so reopening a
+    # scene restores the slider values that produced the curve.
+    curve_params: dict = field(default_factory=dict)
+
     # Computed (None until generated successfully):
     gen_result: Optional[GenerationResult] = None
     sim_result: Optional[RollSimulationResult] = None

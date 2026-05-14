@@ -61,6 +61,14 @@ GROUND_GRID_WIDTH = 1.4
 GROUND_GRID_TICKS = 13
 TRAJECTORY_ALPHA = 0.85
 
+# Available shaders for the solid mesh.  Keys are display labels.
+MESH_SHADERS = {
+    "Shaded": "shaded",
+    "Normal colors": "normalColor",
+    "Balloon (no light)": "balloon",
+    "Edge highlight": "edgeHilight",
+}
+
 
 def _hex_to_rgba(hex_color: str, alpha: float = 1.0) -> Tuple[float, float, float, float]:
     s = hex_color.strip().lstrip("#")
@@ -75,9 +83,31 @@ def _hex_to_rgba(hex_color: str, alpha: float = 1.0) -> Tuple[float, float, floa
 def _make_animation_mesh(
     vertices: np.ndarray, faces: np.ndarray, max_faces: int = 1800
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Return a render-ready (vertices, faces) pair.
+
+    Stride-sampling faces (`faces[::stride]`) drops neighbouring triangles
+    and leaves a disconnected sparse cloud — the surface looks like a dot
+    pattern instead of a solid shell. The GPU backend can render the full
+    marching-cubes mesh (~10–60k faces) without trouble, so we just hand
+    every triangle through as-is. The Matplotlib fallback uses its own,
+    gentler decimator that keeps connectivity.
+    """
+    del max_faces
+    return vertices.astype(np.float32), faces.astype(np.int32)
+
+
+def _make_mpl_mesh(
+    vertices: np.ndarray, faces: np.ndarray, max_faces: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Decimate by face stride for the slow Matplotlib backend only.
+
+    This still introduces gaps but is acceptable for the CPU fallback where
+    the alternative is unusable framerates. Stride is capped at 3 so the
+    surface remains visually mostly continuous.
+    """
     if faces.shape[0] <= max_faces:
         return vertices.astype(np.float32), faces.astype(np.int32)
-    stride = max(1, int(np.ceil(faces.shape[0] / float(max_faces))))
+    stride = min(3, max(1, int(np.ceil(faces.shape[0] / float(max_faces)))))
     faces_sub = faces[::stride]
     unique_indices, inverse = np.unique(faces_sub.reshape(-1), return_inverse=True)
     vertices_sub = vertices[unique_indices]
@@ -154,6 +184,8 @@ class _MultiTrajectoidGLViewer(QtWidgets.QWidget):
         self._duration_s = 12.0
         self._loop = False
         self._is_playing = False
+        self._shader = "shaded"
+        self._opacity = 1.0
 
         self._update_grid(radius=4.0)
         self._reset_camera_default()
@@ -260,6 +292,8 @@ class _MultiTrajectoidGLViewer(QtWidgets.QWidget):
         rot0 = st.rotations[0]
         trans0 = st.translations[0] + st.start_offset
         verts0 = (st.lod_vertices @ rot0.T) + trans0
+        r, g, b, _ = color_rgba
+        display_color = (r, g, b, self._opacity)
         st.mesh_face_item = gl.GLMeshItem(
             vertexes=verts0.astype(np.float32),
             faces=st.lod_faces,
@@ -267,11 +301,12 @@ class _MultiTrajectoidGLViewer(QtWidgets.QWidget):
             drawEdges=self._wireframe,
             drawFaces=True,
             edgeColor=(0.15, 0.18, 0.22, 0.85),
-            color=color_rgba,
-            shader="shaded",
+            color=display_color,
+            shader=self._shader,
             computeNormals=True,
         )
-        st.mesh_face_item.setGLOptions("opaque")
+        gl_opts = "translucent" if self._opacity < 1.0 else "opaque"
+        st.mesh_face_item.setGLOptions(gl_opts)
         self._view.addItem(st.mesh_face_item)
 
         # Trajectory line on the ground plane (full curve, slightly above z=0).
@@ -355,6 +390,23 @@ class _MultiTrajectoidGLViewer(QtWidgets.QWidget):
                 st.mesh_face_item.opts["drawEdges"] = self._wireframe
                 st.mesh_face_item.update()
 
+    def set_shader(self, shader_name: str) -> None:
+        self._shader = shader_name
+        for st in self._dancer_state.values():
+            if st.mesh_face_item is not None:
+                st.mesh_face_item.opts["shader"] = self._shader
+                st.mesh_face_item.update()
+
+    def set_opacity(self, opacity: float) -> None:
+        self._opacity = float(np.clip(opacity, 0.0, 1.0))
+        gl_opts = "translucent" if self._opacity < 1.0 else "opaque"
+        for st in self._dancer_state.values():
+            if st.mesh_face_item is not None:
+                r, g, b, _ = st.color_rgba
+                st.mesh_face_item.opts["color"] = (r, g, b, self._opacity)
+                st.mesh_face_item.setGLOptions(gl_opts)
+                st.mesh_face_item.update()
+
     def _on_tick(self) -> None:
         dt = self.TIMER_INTERVAL_MS / 1000.0
         self._global_t += dt / max(self._duration_s, 1e-3)
@@ -382,10 +434,7 @@ class _MultiTrajectoidGLViewer(QtWidgets.QWidget):
                 st.mesh_face_item.setMeshData(
                     vertexes=verts.astype(np.float32),
                     faces=st.lod_faces,
-                    color=st.color_rgba,
-                    smooth=True,
-                    drawEdges=self._wireframe,
-                    edgeColor=(0.15, 0.18, 0.22, 0.85),
+                    computeNormals=False,
                 )
 
 
@@ -408,6 +457,7 @@ class _MultiTrajectoidMplViewer(QtWidgets.QWidget):
         self._dancer_state: Dict[str, _DancerState] = {}
         self._wireframe = False
         self._show_trajectories = True
+        self._opacity = 1.0
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -437,7 +487,7 @@ class _MultiTrajectoidMplViewer(QtWidgets.QWidget):
         gen = dancer.gen_result
         sim = dancer.sim_result
         normalized = normalize_sim(sim, self.GLOBAL_TICKS)
-        lod_v, lod_f = _make_animation_mesh(gen.vertices, gen.faces, max_faces=520)
+        lod_v, lod_f = _make_mpl_mesh(gen.vertices, gen.faces, max_faces=520)
         color_rgba = _hex_to_rgba(dancer.color_hex, alpha=1.0)
         start_offset = np.array(
             [float(dancer.start_offset_xy[0]), float(dancer.start_offset_xy[1]), 0.0],
@@ -492,6 +542,14 @@ class _MultiTrajectoidMplViewer(QtWidgets.QWidget):
 
     def set_wireframe(self, enabled: bool) -> None:
         self._wireframe = bool(enabled)
+        if not self._is_playing:
+            self._render_static()
+
+    def set_shader(self, shader_name: str) -> None:
+        pass  # Matplotlib backend has no programmable shader
+
+    def set_opacity(self, opacity: float) -> None:
+        self._opacity = float(np.clip(opacity, 0.0, 1.0))
         if not self._is_playing:
             self._render_static()
 
@@ -571,7 +629,7 @@ class _MultiTrajectoidMplViewer(QtWidgets.QWidget):
         tri = verts[faces]
         coll = Poly3DCollection(
             tri,
-            facecolors=(color_rgba[0], color_rgba[1], color_rgba[2], 0.85),
+            facecolors=(color_rgba[0], color_rgba[1], color_rgba[2], self._opacity),
             edgecolors=(0.15, 0.18, 0.22, 0.6) if self._wireframe else "none",
             linewidths=0.4 if self._wireframe else 0.0,
         )
