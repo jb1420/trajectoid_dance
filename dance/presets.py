@@ -171,6 +171,24 @@ def gen_star(n_points: float = 5, inner_ratio: float = 0.45) -> np.ndarray:
     return _finalize(_polygon_perimeter(np.asarray(verts), _N_SAMPLES))
 
 
+def gen_star_polygon(n_points: float = 5, step: float = 2) -> np.ndarray:
+    # {n/k} star polygon: place n vertices on a circle, then connect every
+    # k-th one. n_points=5, step=2 is the classic pentagram (K5 minus the
+    # outer pentagon). The self-intersecting "drawn in one stroke" star.
+    n = max(5, int(round(n_points)))
+    s = int(round(step))
+    s = max(2, min(s, n - 2))
+    verts = []
+    idx = 0
+    while True:
+        ang = 2 * np.pi * idx / n
+        verts.append([np.cos(ang), np.sin(ang)])
+        idx = (idx + s) % n
+        if idx == 0:
+            break
+    return _finalize(_polygon_perimeter(np.asarray(verts), _N_SAMPLES))
+
+
 def gen_rose(k: float = 3) -> np.ndarray:
     k = max(2, int(round(k)))
     # r = |cos(k t)| with a small offset so the curve never passes through the
@@ -214,6 +232,10 @@ PRESET_SPECS: Tuple[PresetSpec, ...] = (
                (Param("n_points",    "Points",      4,   12,   5,   int,   1),
                 Param("inner_ratio", "Inner ratio", 0.2, 0.8,  0.45, float, 0.05)),
                gen_star),
+    PresetSpec("star_polygon", "Star polygon {n/k}",
+               (Param("n_points", "Points", 5, 12, 5, int, 1),
+                Param("step",     "Step",   2,  5, 2, int, 1)),
+               gen_star_polygon),
     PresetSpec("rose",         "Rose curve",
                (Param("k", "Petal count", 2, 8, 3, int, 1),),
                gen_rose),
