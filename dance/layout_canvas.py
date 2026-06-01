@@ -158,36 +158,74 @@ class LayoutCanvasWidget(QtWidgets.QWidget):
     def _draw_grid(self, painter: QtGui.QPainter) -> None:
         w = self.width()
         h = self.height()
-        tl = self._screen_to_world(0, 0)
-        br = self._screen_to_world(w, h)
-        x_min, x_max = min(tl[0], br[0]), max(tl[0], br[0])
-        y_min, y_max = min(tl[1], br[1]), max(tl[1], br[1])
-        ix_lo, ix_hi = int(np.floor(x_min)), int(np.ceil(x_max))
-        iy_lo, iy_hi = int(np.floor(y_min)), int(np.ceil(y_max))
+        # Determine world-space corners and maximum radius from origin
+        corners = [
+            self._screen_to_world(0, 0),
+            self._screen_to_world(w, 0),
+            self._screen_to_world(w, h),
+            self._screen_to_world(0, h),
+        ]
+        max_r = max(float(np.linalg.norm(c)) for c in corners) * 1.05
+
+        # Choose a world-unit spacing that aims for ~40 pixels between concentric
+        # circles, then snap to a "nice" step (1,2,5 × 10^k).
+        target_px = 40.0
+        world_spacing = max(0.01, target_px / max(1.0, self._view_scale))
+
+        def _nice_step(s: float) -> float:
+            exp = np.floor(np.log10(s))
+            base = s / (10 ** exp)
+            if base <= 1.5:
+                b = 1.0
+            elif base <= 3.5:
+                b = 2.0
+            elif base <= 7.5:
+                b = 5.0
+            else:
+                b = 10.0
+            return float(b * 10 ** exp)
+
+        spacing = _nice_step(world_spacing)
+        if spacing <= 0:
+            spacing = 1.0
+
+        radii = np.arange(spacing, max_r + spacing, spacing)
+
         pen_grid = QtGui.QPen(QtGui.QColor("#2c3138"), 1)
         pen_grid.setCosmetic(True)
         painter.setPen(pen_grid)
-        # Skip grid if zoomed out so far it would be visual noise.
-        if (ix_hi - ix_lo) <= 200 and (iy_hi - iy_lo) <= 200:
-            for x in range(ix_lo, ix_hi + 1):
-                p1 = self._world_to_screen_xy(np.array([x, y_min]))
-                p2 = self._world_to_screen_xy(np.array([x, y_max]))
-                painter.drawLine(QtCore.QPointF(p1[0], p1[1]),
-                                 QtCore.QPointF(p2[0], p2[1]))
-            for y in range(iy_lo, iy_hi + 1):
-                p1 = self._world_to_screen_xy(np.array([x_min, y]))
-                p2 = self._world_to_screen_xy(np.array([x_max, y]))
-                painter.drawLine(QtCore.QPointF(p1[0], p1[1]),
-                                 QtCore.QPointF(p2[0], p2[1]))
-        # Origin axes
+
+        origin_screen = self._world_to_screen_xy(np.array([0.0, 0.0]))
+        cx, cy = float(origin_screen[0]), float(origin_screen[1])
+
+        # Draw concentric circles (polar grid)
+        for r in radii:
+            pr = r * self._view_scale
+            if pr < 1.0:
+                continue
+            painter.drawEllipse(QtCore.QPointF(cx, cy), pr, pr)
+
+        # Draw radial lines. Angle density adapts with zoom; more detail when
+        # zoomed in.
+        angle_step_deg = 30
+        if self._view_scale > 120:
+            angle_step_deg = 15
+        if self._view_scale > 320:
+            angle_step_deg = 10
+        n_angles = max(4, int(360 // angle_step_deg))
+        for i in range(n_angles):
+            theta = 2.0 * np.pi * i / float(n_angles)
+            ex = np.cos(theta) * max_r
+            ey = np.sin(theta) * max_r
+            p = self._world_to_screen_xy(np.array([ex, ey]))
+            painter.drawLine(QtCore.QPointF(cx, cy), QtCore.QPointF(float(p[0]), float(p[1])))
+
+        # Origin crosshair / axes (stronger lines)
         pen_axis = QtGui.QPen(QtGui.QColor("#3a4a55"), 2)
         pen_axis.setCosmetic(True)
         painter.setPen(pen_axis)
-        origin = self._world_to_screen_xy(np.array([0.0, 0.0]))
-        painter.drawLine(QtCore.QPointF(0, origin[1]),
-                         QtCore.QPointF(w, origin[1]))
-        painter.drawLine(QtCore.QPointF(origin[0], 0),
-                         QtCore.QPointF(origin[0], h))
+        painter.drawLine(QtCore.QPointF(0, cy), QtCore.QPointF(w, cy))
+        painter.drawLine(QtCore.QPointF(cx, 0), QtCore.QPointF(cx, h))
 
     def _draw_dancer(self, painter: QtGui.QPainter, d: Dancer) -> None:
         if d.curve_xy.shape[0] < 2:

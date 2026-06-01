@@ -215,6 +215,18 @@ def gen_clover(n_leaves: float = 3) -> np.ndarray:
     return _finalize(np.column_stack([radius * np.cos(t), radius * np.sin(t)]))
 
 
+def gen_trefoil() -> np.ndarray:
+    """A planar trefoil-like three-lobed curve (useful as a decorative preset).
+
+    Parametrization adapted for a smooth 2D trefoil projection.
+    """
+    t = _t()
+    x = np.sin(t) + 2.0 * np.sin(2.0 * t)
+    y = np.cos(t) - 2.0 * np.cos(2.0 * t)
+    raw = np.column_stack([x, y])
+    return _finalize(raw)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -251,6 +263,7 @@ PRESET_SPECS: Tuple[PresetSpec, ...] = (
     PresetSpec("clover",       "Clover",
                (Param("n_leaves", "Leaves", 2, 8, 3, int, 1),),
                gen_clover),
+    PresetSpec("trefoil",      "Trefoil",               (),                                                        gen_trefoil),
 )
 
 

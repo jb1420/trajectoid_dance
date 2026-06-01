@@ -76,4 +76,11 @@ for i in range(4):
 save_scene(s3, OUT / "canon.tdance")
 print("  -> canon.tdance\n")
 
+# -- Scene 4: Trefoil --------------------------------------------------------
+print("=== Scene 4: Trefoil ===")
+s4 = DanceScene(duration_seconds=12.0, loop=True)
+s4.add(_dancer("Treo", "trefoil", "#ff7f00", start=(0.0, 0.0), phase=0.0))
+save_scene(s4, OUT / "trefoil.tdance")
+print("  -> trefoil.tdance\n")
+
 print("All done. Files in:", OUT)
