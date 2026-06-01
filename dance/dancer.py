@@ -182,13 +182,33 @@ def generate_dancer(
         core_radius=core_radius,
     )
 
+    # WYSIWYG rescale (layout = source of truth).
+    #
+    # The doubling solver returns a trajectoid that rolls along ``pts * s*``
+    # (``s*`` = gen.scale, the pi-rotation scale) with a unit-ish ``core_radius``.
+    # Because ``s*`` comes from a pi-rotation normalisation it is fixed by the
+    # curve *shape* alone, so the rolled path would be ``s*`` times the size the
+    # user drew in the layout — and resizing the curve in the layout would have
+    # no effect on it. A trajectoid is scale-covariant: scaling the body, its
+    # path and its rolling radius all by the same factor stays a valid
+    # trajectoid. So we scale the whole system by ``1/s*`` to make the rolled
+    # path coincide with the drawn curve. The ball radius then becomes
+    # ``core_radius / s*`` (varies modestly with shape), and the layout becomes
+    # an exact preview of where each dancer rolls.
+    s_star = float(gen.scale)
+    inv = 1.0 / s_star if s_star > 1e-9 else 1.0
+    gen.vertices = gen.vertices * inv
+    gen.resampled_points = gen.resampled_points * inv
+    gen.surface_contact_curve = gen.surface_contact_curve * inv
+    effective_radius = core_radius * inv
+
     cycle_pts = gen.resampled_points
     closed_cycle = np.vstack([cycle_pts, cycle_pts[0]])
     cycle_arc = float(path_length(closed_cycle))
     # One full period of a two-period trajectoid is two laps (R^2 = I), so roll
     # at least two laps for the pose to come back to its start.
     laps = max(2, int(dancer.n_cycles))
-    target_angle = (cycle_arc / max(core_radius, 1e-9)) * laps
+    target_angle = (cycle_arc / max(effective_radius, 1e-9)) * laps
     n_frames = max(240, 200 * laps)
 
     sim = build_roll_simulation(
@@ -196,7 +216,7 @@ def generate_dancer(
         target_roll_angle_rad=target_angle,
         closed=True,
         n_frames=n_frames,
-        core_radius=core_radius,
+        core_radius=effective_radius,
     )
 
     dancer.gen_result = gen

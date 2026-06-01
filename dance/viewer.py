@@ -55,19 +55,63 @@ else:
 
 from dancer import Dancer, normalize_sim
 
+# Default solid-mesh shader. We deliberately stick to pyqtgraph's *built-in*
+# shaders: a custom shader appended to ``shaders.Shaders`` at import time gets
+# wiped whenever pyqtgraph lazily re-runs ``initShaders()`` (on GL-context
+# creation), after which the name lookup fails and the mesh draws nothing.
+DEFAULT_MESH_SHADER = "shaded"
+
+# Sentinel selected from the shader combo for the low-resource render path.
+SIMPLE_MODE_KEY = "simple"
+
 
 GROUND_GRID_COLOR = (0.76, 0.81, 0.86, 0.95)
 GROUND_GRID_WIDTH = 1.4
 GROUND_GRID_TICKS = 13
 TRAJECTORY_ALPHA = 0.85
 
-# Available shaders for the solid mesh.  Keys are display labels.
+# Available render modes for the solid mesh.  Keys are display labels.
+# "Simple (fast)" is a low-resource path: it swaps each body to a decimated
+# low-poly shell and a cheap flat shader (see _MultiTrajectoidGLViewer.set_shader).
 MESH_SHADERS = {
-    "Shaded": "shaded",
+    "Shaded": DEFAULT_MESH_SHADER,
+    "Simple (fast)": SIMPLE_MODE_KEY,
     "Normal colors": "normalColor",
-    "Balloon (no light)": "balloon",
     "Edge highlight": "edgeHilight",
 }
+
+
+def _cluster_decimate(
+    vertices: np.ndarray, faces: np.ndarray, cells: int = 18
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Grid-cluster decimation: collapse vertices sharing a voxel cell.
+
+    Cheap (O(V+F), computed once per dancer) and keeps the shell watertight-ish
+    by snapping nearby vertices to a shared representative, then dropping faces
+    that collapse to a degenerate triangle. Vertex count is capped at cells**3,
+    so the simple render path uploads and rasterises a fraction of the geometry.
+    """
+    if faces.shape[0] == 0:
+        return vertices.astype(np.float32), faces.astype(np.int32)
+    v = vertices.astype(np.float64)
+    vmin = v.min(axis=0)
+    span = np.maximum(v.max(axis=0) - vmin, 1e-9)
+    ijk = np.clip(np.floor((v - vmin) / span * cells).astype(np.int64), 0, cells - 1)
+    cell_id = (ijk[:, 0] * cells + ijk[:, 1]) * cells + ijk[:, 2]
+    _, inverse = np.unique(cell_id, return_inverse=True)
+    new_n = int(inverse.max()) + 1
+    sums = np.zeros((new_n, 3), dtype=np.float64)
+    counts = np.zeros(new_n, dtype=np.float64)
+    np.add.at(sums, inverse, v)
+    np.add.at(counts, inverse, 1.0)
+    new_verts = (sums / counts[:, None]).astype(np.float32)
+    new_faces = inverse[faces]
+    a, b, c = new_faces[:, 0], new_faces[:, 1], new_faces[:, 2]
+    keep = (a != b) & (b != c) & (a != c)
+    new_faces = new_faces[keep].astype(np.int32)
+    if new_faces.shape[0] == 0:
+        return vertices.astype(np.float32), faces.astype(np.int32)
+    return new_verts, new_faces
 
 
 def _hex_to_rgba(hex_color: str, alpha: float = 1.0) -> Tuple[float, float, float, float]:
@@ -117,6 +161,7 @@ def _make_mpl_mesh(
 class _DancerState:
     __slots__ = (
         "vertices", "faces", "lod_vertices", "lod_faces",
+        "simple_vertices", "simple_faces",
         "translations", "rotations", "trajectory_xy",
         "start_offset", "color_rgba", "phase", "speed", "frame_count",
         "mesh_face_item", "trajectory_item",
@@ -135,11 +180,15 @@ class _DancerState:
         color_rgba: Tuple[float, float, float, float],
         phase: float,
         speed: float,
+        simple_vertices: Optional[np.ndarray] = None,
+        simple_faces: Optional[np.ndarray] = None,
     ) -> None:
         self.vertices = vertices
         self.faces = faces
         self.lod_vertices = lod_vertices
         self.lod_faces = lod_faces
+        self.simple_vertices = lod_vertices if simple_vertices is None else simple_vertices
+        self.simple_faces = lod_faces if simple_faces is None else simple_faces
         self.translations = translations
         self.rotations = rotations
         self.trajectory_xy = trajectory_xy
@@ -184,11 +233,30 @@ class _MultiTrajectoidGLViewer(QtWidgets.QWidget):
         self._duration_s = 12.0
         self._loop = False
         self._is_playing = False
-        self._shader = "shaded"
+        self._shader = DEFAULT_MESH_SHADER
+        self._simple_mode = False
         self._opacity = 1.0
 
         self._update_grid(radius=4.0)
         self._reset_camera_default()
+
+    # -- transform helper ----------------------------------------------------
+
+    @staticmethod
+    def _pose_matrix(rot: np.ndarray, trans: np.ndarray) -> "QtGui.QMatrix4x4":
+        """Pack a 3x3 rotation + translation into a column-vector GL transform.
+
+        Applying the pose through the GL item transform (instead of baking it
+        into the vertex array) lets OpenGL's gl_NormalMatrix re-orient the
+        surface normals every frame, so lighting follows the rolling body and
+        the shell reads as solid rather than flat.
+        """
+        return QtGui.QMatrix4x4(
+            float(rot[0, 0]), float(rot[0, 1]), float(rot[0, 2]), float(trans[0]),
+            float(rot[1, 0]), float(rot[1, 1]), float(rot[1, 2]), float(trans[1]),
+            float(rot[2, 0]), float(rot[2, 1]), float(rot[2, 2]), float(trans[2]),
+            0.0, 0.0, 0.0, 1.0,
+        )
 
     # -- camera helpers ------------------------------------------------------
 
@@ -268,6 +336,7 @@ class _MultiTrajectoidGLViewer(QtWidgets.QWidget):
         normalized = normalize_sim(sim, self.GLOBAL_TICKS)
 
         lod_v, lod_f = _make_animation_mesh(gen.vertices, gen.faces, max_faces=1500)
+        simple_v, simple_f = _cluster_decimate(lod_v, lod_f)
         color_rgba = _hex_to_rgba(dancer.color_hex, alpha=1.0)
         start_offset = np.array(
             [float(dancer.start_offset_xy[0]), float(dancer.start_offset_xy[1]), 0.0],
@@ -286,24 +355,28 @@ class _MultiTrajectoidGLViewer(QtWidgets.QWidget):
             color_rgba=color_rgba,
             phase=dancer.phase_offset,
             speed=dancer.speed_multiplier,
+            simple_vertices=simple_v,
+            simple_faces=simple_f,
         )
 
-        # Initial mesh at frame 0.
-        rot0 = st.rotations[0]
-        trans0 = st.translations[0] + st.start_offset
-        verts0 = (st.lod_vertices @ rot0.T) + trans0
+        # Mesh stays in body frame; the per-frame pose is applied via the GL
+        # item transform so normals re-light correctly as the body rolls.
+        verts, faces, shader = self._mode_mesh(st)
         r, g, b, _ = color_rgba
         display_color = (r, g, b, self._opacity)
         st.mesh_face_item = gl.GLMeshItem(
-            vertexes=verts0.astype(np.float32),
-            faces=st.lod_faces,
+            vertexes=verts,
+            faces=faces,
             smooth=True,
             drawEdges=self._wireframe,
             drawFaces=True,
             edgeColor=(0.15, 0.18, 0.22, 0.85),
             color=display_color,
-            shader=self._shader,
+            shader=shader,
             computeNormals=True,
+        )
+        st.mesh_face_item.setTransform(
+            self._pose_matrix(st.rotations[0], st.translations[0] + st.start_offset)
         )
         gl_opts = "translucent" if self._opacity < 1.0 else "opaque"
         st.mesh_face_item.setGLOptions(gl_opts)
@@ -390,12 +463,36 @@ class _MultiTrajectoidGLViewer(QtWidgets.QWidget):
                 st.mesh_face_item.opts["drawEdges"] = self._wireframe
                 st.mesh_face_item.update()
 
+    def _mode_mesh(self, st: _DancerState) -> Tuple[np.ndarray, np.ndarray, str]:
+        """Pick the (vertices, faces, shader) for the active render mode.
+
+        Simple mode swaps in the decimated shell and the cheap flat ``balloon``
+        shader so the GPU rasterises a fraction of the triangles with no
+        per-light math; every other mode uses the full-resolution mesh.
+        """
+        if self._simple_mode:
+            return st.simple_vertices, st.simple_faces, "balloon"
+        return st.lod_vertices, st.lod_faces, self._shader
+
     def set_shader(self, shader_name: str) -> None:
-        self._shader = shader_name
+        self._simple_mode = shader_name == SIMPLE_MODE_KEY
+        if not self._simple_mode:
+            self._shader = shader_name
         for st in self._dancer_state.values():
-            if st.mesh_face_item is not None:
-                st.mesh_face_item.opts["shader"] = self._shader
-                st.mesh_face_item.update()
+            item = st.mesh_face_item
+            if item is None:
+                continue
+            verts, faces, shader = self._mode_mesh(st)
+            # setMeshData rebuilds the body-frame geometry; the per-frame pose
+            # still rides on the GL transform, so re-seat it at the rest pose.
+            item.setMeshData(
+                vertexes=verts, faces=faces, computeNormals=True, smooth=True
+            )
+            item.opts["shader"] = shader
+            item.setTransform(
+                self._pose_matrix(st.rotations[0], st.translations[0] + st.start_offset)
+            )
+            item.update()
 
     def set_opacity(self, opacity: float) -> None:
         self._opacity = float(np.clip(opacity, 0.0, 1.0))
@@ -427,14 +524,9 @@ class _MultiTrajectoidGLViewer(QtWidgets.QWidget):
             local_t = ((global_t * st.speed) + st.phase) % 1.0
             f = int(local_t * (st.frame_count - 1))
             f = max(0, min(st.frame_count - 1, f))
-            rot = st.rotations[f]
-            trans = st.translations[f] + st.start_offset
-            verts = (st.lod_vertices @ rot.T) + trans
             if st.mesh_face_item is not None:
-                st.mesh_face_item.setMeshData(
-                    vertexes=verts.astype(np.float32),
-                    faces=st.lod_faces,
-                    computeNormals=False,
+                st.mesh_face_item.setTransform(
+                    self._pose_matrix(st.rotations[f], st.translations[f] + st.start_offset)
                 )
 
 

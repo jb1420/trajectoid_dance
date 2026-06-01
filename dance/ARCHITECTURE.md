@@ -78,12 +78,15 @@ dance/
   - `_make_animation_mesh(...)`: GPU 백엔드는 face 전체를 그대로 사용 (decimation 안 함). 과거 stride 샘플링 때문에 mesh 가 점/구멍처럼 보이던 버그를 제거.
   - `_make_mpl_mesh(...)`: Matplotlib 전용 보수적 decimator (stride ≤ 3).
   - `_hex_to_rgba(...)`: dancer color hex → rgba.
+  - `_cluster_decimate(vertices, faces, cells=18)`: **Simple 모드용** 그리드-클러스터 데시메이션. 정점을 voxel 셀(최대 `cells³`)로 묶어 대표점으로 스냅 → degenerate face 제거. O(V+F), dancer 당 1회. 면 수 ~70% 감소(예: 8.6k→2.6k)하면서 셸 형태 유지.
+  - `_pose_matrix(rot, trans)` (GL 뷰어 staticmethod): 3×3 회전 + 평행이동을 **column-vector GL 변환행렬**(`QMatrix4x4`)로 묶음.
 - 뷰어 API (백엔드 공통):
   - `add_or_update_dancer(d)` / `remove_dancer(id)` / `clear_dancers()`
   - `start_play(duration, loop)` / `stop_play()` / `is_playing` / `playFinished` 시그널
   - `reset_view()`, `set_wireframe(bool)`, `set_shader(name)`, `set_opacity(float)`
-- 상수: `MESH_SHADERS` (Shaded / Normal colors / Balloon / Edge highlight).
-- 프레임 변환식: `world = (lod_vertices @ rot.T) + (translation + start_offset)`.
+- 상수: `MESH_SHADERS` = **Shaded / Simple (fast) / Normal colors / Edge highlight**. **반드시 pyqtgraph 내장 셰이더만 사용** — import 시점에 `shaders.Shaders` 에 append 한 커스텀 셰이더는 GL 컨텍스트 생성 시 `initShaders()` 가 리스트를 재초기화하며 지워져 이름 조회 실패 → 메쉬가 안 그려진다(과거 `danceShaded` 가 안 보이던 원인). 기본값 `DEFAULT_MESH_SHADER="shaded"`.
+- **Simple (fast) 모드** (`SIMPLE_MODE_KEY="simple"`): 콤보에서 고르면 `set_shader` 가 `_simple_mode=True` 로 전환. `_mode_mesh(st)` 가 각 dancer 를 **데시메이트된 저폴리 셸 + 값싼 `balloon` 셰이더**(조명 계산 거의 없음)로 바꿔 `setMeshData` 재업로드. GPU 가 래스터하는 삼각형 수를 크게 줄여 컴퓨팅 자원을 아낀다. 다른 모드로 돌아가면 full-res 메쉬 복원.
+- **프레임 변환 (입체감 핵심)**: 메쉬는 **body frame 정점 그대로** GL 아이템에 올리고, 프레임마다 `setTransform(_pose_matrix(rot, trans+start_offset))` 로 포즈만 갱신. 정점에 회전을 굽지 않으므로 OpenGL `gl_NormalMatrix` 가 매 프레임 법선을 재정렬 → 굴러갈 때 셰이딩이 형상을 따라가 입체감이 산다. (과거엔 `verts = lod_vertices @ rot.T` 로 정점을 굽고 `computeNormals=False` 라 법선이 frame 0 에 고정 → 평평하게 보이던 버그.)
 - 캐시 디렉터리(`XDG_CACHE_HOME`, `MPLCONFIGDIR`)를 import 시점에 자동 생성.
 
 ### `layout_canvas.py` — 2D top-down 레이아웃 캔버스 (신규)
@@ -142,7 +145,8 @@ dance/
 - `DanceScene`: `dancers` 리스트 + `duration_seconds`, `loop`, `global_ticks=480`. `add()`, `remove(dancer_id)`, `find(dancer_id)`, `next_color()`, `next_name()` 헬퍼.
 - `prepare_curve(raw, source)`: freehand 면 Y-flip (Qt 화면→수학좌표), recenter, smooth(1 pass), resample(320pt). closed=True 강제.
 - `_resample_translations`, `_resample_rotations_nearest`, `normalize_sim`: sim 결과를 `global_ticks` 길이로 리샘플 (모든 dancer 의 공통 timeline).
-- `generate_dancer(d, *, resolution=96, core_radius=1.0)`: prepare → validate → **`generate_two_period_trajectoid_mesh`**(닫힌곡선 항상 2주기) → build_roll_simulation 까지 한 번에. 굴림은 최소 2바퀴(`laps = max(2, n_cycles)`)로 한 주기를 채워 자세가 원위치로 복귀. ValueError 로 실패 사유 전달.
+- `generate_dancer(d, *, resolution=96, core_radius=1.0)`: prepare → validate → **`generate_two_period_trajectoid_mesh`**(닫힌곡선 항상 2주기) → **WYSIWYG 리스케일** → build_roll_simulation 까지 한 번에. 굴림은 최소 2바퀴(`laps = max(2, n_cycles)`)로 한 주기를 채워 자세가 원위치로 복귀. ValueError 로 실패 사유 전달.
+  - **WYSIWYG 리스케일 (레이아웃 = source of truth)**: doubling 이 돌려준 트라젝토이드는 `pts × s*`(`s* = gen.scale`, π-회전 스케일) 위를 `core_radius` 로 구른다. `s*` 는 π-회전 정규화라 **곡선 모양만으로 정해져** 입력 크기와 무관 → 보정 없으면 3D 궤적이 레이아웃보다 `s*` 배 크고, 레이아웃에서 곡선을 키워도 3D 크기가 안 변함. 트라젝토이드는 **스케일 공변**(몸체·경로·구름반지름을 같은 배율로 키워도 여전히 유효)이므로 전체를 `1/s*` 로 스케일 → 굴림 궤적이 그린 곡선과 정확히 일치. 그 결과 **공 반지름 = `core_radius / s*`** (모양마다 조금씩 다름), 굴림 시뮬레이션도 이 `effective_radius` 로 수행. `gen.scale` 은 진단용으로 여전히 `s*` 를 보관(info 라벨 표시).
 
 ### `curve_editor.py` — Freehand 커브 그리기 위젯
 - `Tool` 상수: FREEHAND / BEZIER / POLYLINE / ERASER / SELECT.
@@ -204,9 +208,13 @@ PySide6, numpy, scipy, scikit-image, matplotlib, pyqtgraph, PyOpenGL.
 | 하고 싶은 것 | 손볼 파일 |
 |---|---|
 | 메쉬가 점·와이어로 보이는 문제 | `viewer._make_animation_mesh`, `_DancerState.lod_*` |
+| 굴러갈 때 평평·입체감 없음 | `viewer._draw_frame` 는 `setTransform(_pose_matrix(...))` 로 포즈만 갱신(정점 굽지 말 것) → 법선이 형상 따라감 |
+| 특정 셰이더에서 오브젝트가 안 보임 | 커스텀 셰이더 금지(내장만). `MESH_SHADERS` 값은 pyqtgraph 내장 이름이어야 함 |
+| 저사양·성능 모드 | Simple (fast) = `_cluster_decimate` 저폴리 + `balloon`. `viewer._mode_mesh` / `set_shader` 의 `_simple_mode` |
 | 메쉬 색·셰이딩·투명도 | `viewer.MESH_SHADERS`, `set_shader`/`set_opacity`, `app.py` playback form |
 | 굴림 방향이 거꾸로 | `trajectoids_adapter.build_roll_simulation` 의 axis = `(-dy, dx, 0)` |
 | 2주기 스케일/π-회전 탐색 조정 | `doubling.find_pi_rotation_scale` (`lo_factor`/`hi_factor`/`coarse_tol`/`fine_tol`) |
+| 레이아웃과 3D 궤적 크기/위치가 안 맞음 | `dancer.generate_dancer` 의 **WYSIWYG 리스케일**(`1/s*`) + `effective_radius`. 끄면 `s*` 배 차이 재발 |
 | 닫힌곡선 메쉬가 근사로만 나옴 / mismatch 큼 | `doubling.generate_two_period_trajectoid_mesh` (2주기 정확 생성). 단일주기는 `trajectoids_adapter.generate_trajectoid_mesh` |
 | 새 프리셋 추가 (fixed) | `presets.py` 에 `gen_xxx` 함수 + `PresetSpec(..., (), gen_xxx)` 를 `PRESET_SPECS` 에 등록 |
 | 새 프리셋 추가 (parametric) | `gen_xxx(param=...)` + `PresetSpec(..., (Param(...),...), gen_xxx)`. UI 슬라이더는 자동 생성 |
@@ -226,3 +234,4 @@ PySide6, numpy, scipy, scikit-image, matplotlib, pyqtgraph, PyOpenGL.
 - **트랜스폼**: 렌더 시 `world = (verts @ rot.T) + translation + start_offset`. 순서를 바꾸면 회전 중심이 어긋남.
 - **Cache 무효화**: `curve_xy` 가 바뀌면(레이아웃 회전·스케일, freehand 수정, parametric 슬라이더, source 전환) `gen_result = sim_result = None` 으로 비워야 함. 레이아웃 캔버스에서는 dashed stroke + `⟳` 마크로 시각적 피드백.
 - **2주기(period-2)**: 닫힌곡선 trajectoid 의 한 주기는 **두 바퀴**다. 한 바퀴 후엔 π 회전 자세, 두 바퀴 후 원자세 복귀(`R²=I`). 굴림은 `laps = max(2, n_cycles)` 로 돌린다. 메쉬는 한 바퀴 trace 가 아니라 **2회 순회 접평면**으로 깎이므로, 같은 곡선이라도 단일주기 형상보다 작다(area≈π vs 2π). `gen_result` 캐시가 있는 옛 `.tdance` 는 재생성 전까지 단일주기 형상 유지.
+- **WYSIWYG 스케일**: `generate_dancer` 가 doubling 결과를 `1/s*` 로 균일 스케일하므로 **3D 굴림 궤적 = 레이아웃에 그린 `curve_xy`** (위치·크기 모두 일치). 대가로 **공 반지름이 dancer 마다 `core_radius/s*`** 로 달라지고, 굴림은 그 `effective_radius` 로 돈다. 레이아웃 캔버스는 별도 변환 없이 `curve_xy + start_offset_xy` 만 그려도 3D 와 맞는다 (단 freehand 는 `curve_xy` 가 Qt y-down 화면좌표라 레이아웃에서 상하반전됨 — 별개 이슈). 곡선 크기를 바꾸려면 레이아웃에서 스케일 후 재생성하면 3D 도 같은 비율로 커진다.
