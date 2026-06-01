@@ -582,6 +582,19 @@ def generate_trajectoid_mesh(
     points = resample_uniform(points, n_points=resample_points, closed=is_closed)
 
     scale, angle, endpoint_gap = estimate_scale(points, core_radius=core_radius)
+    # If estimate_scale produced an unexpectedly small scale (e.g. very
+    # small trajectoids when layout units are large), gently boost it so the
+    # contact trace has a reasonable extent relative to the core radius.
+    # This prevents some user-drawn layouts from generating near-zero-size
+    # trajectoids while preserving the algorithmic estimate.
+    contact_trace = trace_on_sphere(points, scale=scale, core_radius=core_radius)
+    # measure extent about the trace centroid
+    trace_center = np.mean(contact_trace, axis=0)
+    trace_extent = float(np.max(np.linalg.norm(contact_trace - trace_center, axis=1)))
+    min_extent = 0.25 * float(core_radius)
+    if trace_extent < min_extent and trace_extent > EPS:
+        boost = float(np.clip(min_extent / trace_extent, 1.0, 10.0))
+        scale = float(scale * boost)
     if angle > np.deg2rad(65.0):
         raise ValueError(
             "Generation is unstable: trajectory mismatch is too high.\n"
