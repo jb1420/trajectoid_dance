@@ -11,6 +11,7 @@ dance/
 ├── layout_canvas.py        # 2D top-down 레이아웃 캔버스 (드래그/회전/스케일)  ← 신규
 ├── curve_editor.py         # Freehand 커브 입력 위젯 (bezier/polyline/freehand/eraser/select)
 ├── trajectoids_adapter.py  # 수학·메쉬 생성 코어 (구면 trace → SDF → marching cubes → roll sim)
+├── doubling.py             # 2주기(doubling) 생성 코어 — 닫힌곡선의 수학적 정확화 (π-회전 스케일)  ← 신규
 ├── dancer.py               # Dancer / DanceScene 데이터 모델 + generate_dancer 파이프라인
 ├── presets.py              # 프리셋 곡선 (Param/PresetSpec 기반, fixed + parametric)
 ├── scene_io.py             # `.tdance` (zip: scene.json + arrays.npz) 직렬화 + legacy 마이그레이션
@@ -31,7 +32,8 @@ dance/
    curve_xy (Nx2)         ← Dancer.curve_xy (+ Dancer.curve_params, parametric preset 일 때)
         │
         ▼ generate_dancer()
-   prepare_curve → validate → generate_trajectoid_mesh → build_roll_simulation
+   prepare_curve → validate → generate_two_period_trajectoid_mesh → build_roll_simulation
+                              (닫힌곡선은 doubling 으로 2주기 정확 생성)
         │                              │                          │
         ▼                              ▼                          ▼
    resampled curve              GenerationResult            RollSimulationResult
@@ -114,12 +116,24 @@ dance/
   1. `_compute_normals` (구면 trace → half-space 평면 법선)
   2. `_implicit_field` (chunked: sphere ∩ 모든 half-space → SDF 그리드)
   3. `_field_to_mesh` (skimage `marching_cubes`)
-  - 통합 진입점: `generate_trajectoid_mesh(...)` → `GenerationResult`.
+  - 통합 진입점: `generate_trajectoid_mesh(...)` → `GenerationResult` (단일 주기. 닫힌곡선은 `doubling.py` 가 대체).
 - 굴림 시뮬레이션
   - `_clean_path`, `_sample_open_polyline_batch`, `_tile_open_path` (open path 의 자연스러운 무한 연장)
   - `build_roll_simulation(path_xy, target_roll_angle_rad, closed, n_frames, core_radius)` → `RollSimulationResult`.
   - **부호 규약 (project memory 참고)**: 롤 축은 `(-dy, dx, 0)`. 절대 뒤집지 말 것.
 - 출력: `export_binary_stl(vertices, faces, path)`.
+
+### `doubling.py` — 2주기(doubling) 생성 코어 (신규)
+닫힌곡선을 **수학적으로 정확한 2주기 trajectoid** 로 생성. `trajectoids_adapter` 의 코어(`rotations_to_origin`, `trace_on_sphere`, `_rotation_angle`, `_compute_normals`, `_implicit_field`, `_field_to_mesh`, `GenerationResult` 등)를 그대로 재사용하고, **스케일 탐색 + 2회 순회 경로 조립**만 추가.
+
+- **왜 2주기인가**: 한 바퀴 후 자세 복귀(net rotation `= I ∈ SO(3)`)는 조건 3개인데 자유 파라미터(스케일)는 1개라 단일 주기는 과결정 → 일반 폐곡선에서 근사일 뿐. 두 바퀴면 net rotation `= R²` 이고 **`R²=I` ⟺ `R`이 π-회전**(축 자유). π-회전 집합은 SO(3)에서 여유차원 1이라 스케일 하나로 항상 도달 가능(IVT). 이게 임의 폐곡선에 대해 2주기 trajectoid 가 **항상 존재**하는 이유. (Sobolev et al., Nature 620, 2023)
+- 함수
+  - `find_pi_rotation_scale(loop_xy, ...)` → `PiScaleResult`. 한 바퀴 회전각 `θ(s)` 를 스캔해 **처음 π 가 되는 스케일 `s*`** 를 찾음(첫 국소최대 = 첫 π-터치 → `minimize_scalar` 로 정밀화). 범위 내 못 찾으면 1회 확장 후 `ValueError`. `θ(s)` 는 `core_radius` 무관(r=1 규약).
+  - `_doubled_closed_path(loop_xy)` → 두 바퀴 닫힌 폴리라인 `(2N+1, 2)` (정확히 2N 세그먼트). 각 바퀴의 마감 세그먼트 포함.
+  - `generate_two_period_trajectoid_mesh(loop_xy, ...)` → `GenerationResult`. 전처리(recenter/smooth/resample)는 단일 주기와 동일, 스케일만 `s*` 사용. **2회 순회 trace 의 접평면**으로 구를 깎음.
+    - `resampled_points` = 단일 루프 × `s*` (시뮬레이션이 보이는 한 바퀴를 굴리도록). `surface_contact_curve` 만 2회 순회 trace. `mismatch_angle` = `R²` 회전각(≈0).
+  - **65° 단일-주기 검사는 미적용** — 2주기는 mismatch≈0 목표라, `find_pi_rotation_scale` 의 수용 검사(refined `θ ≈ π`)가 실패 게이트.
+- 비고: 대칭 프리셋(원·lemniscate 등)은 기존 단일주기(둘레 area≈2π)보다 **작은 area≈π 형상**으로 바뀜. 한 주기 = 두 바퀴(한 바퀴 후엔 π 회전, 두 바퀴 후 원자세 복귀).
 
 ### `dancer.py` — Dancer / DanceScene 모델
 - `COLOR_PALETTE` (8색).
@@ -128,7 +142,7 @@ dance/
 - `DanceScene`: `dancers` 리스트 + `duration_seconds`, `loop`, `global_ticks=480`. `add()`, `remove(dancer_id)`, `find(dancer_id)`, `next_color()`, `next_name()` 헬퍼.
 - `prepare_curve(raw, source)`: freehand 면 Y-flip (Qt 화면→수학좌표), recenter, smooth(1 pass), resample(320pt). closed=True 강제.
 - `_resample_translations`, `_resample_rotations_nearest`, `normalize_sim`: sim 결과를 `global_ticks` 길이로 리샘플 (모든 dancer 의 공통 timeline).
-- `generate_dancer(d, *, resolution=96, core_radius=1.0)`: prepare → validate → generate_trajectoid_mesh → build_roll_simulation 까지 한 번에. `n_cycles` 에 따라 target roll angle 과 frame 수가 늘어남. ValueError 로 실패 사유 전달.
+- `generate_dancer(d, *, resolution=96, core_radius=1.0)`: prepare → validate → **`generate_two_period_trajectoid_mesh`**(닫힌곡선 항상 2주기) → build_roll_simulation 까지 한 번에. 굴림은 최소 2바퀴(`laps = max(2, n_cycles)`)로 한 주기를 채워 자세가 원위치로 복귀. ValueError 로 실패 사유 전달.
 
 ### `curve_editor.py` — Freehand 커브 그리기 위젯
 - `Tool` 상수: FREEHAND / BEZIER / POLYLINE / ERASER / SELECT.
@@ -192,6 +206,8 @@ PySide6, numpy, scipy, scikit-image, matplotlib, pyqtgraph, PyOpenGL.
 | 메쉬가 점·와이어로 보이는 문제 | `viewer._make_animation_mesh`, `_DancerState.lod_*` |
 | 메쉬 색·셰이딩·투명도 | `viewer.MESH_SHADERS`, `set_shader`/`set_opacity`, `app.py` playback form |
 | 굴림 방향이 거꾸로 | `trajectoids_adapter.build_roll_simulation` 의 axis = `(-dy, dx, 0)` |
+| 2주기 스케일/π-회전 탐색 조정 | `doubling.find_pi_rotation_scale` (`lo_factor`/`hi_factor`/`coarse_tol`/`fine_tol`) |
+| 닫힌곡선 메쉬가 근사로만 나옴 / mismatch 큼 | `doubling.generate_two_period_trajectoid_mesh` (2주기 정확 생성). 단일주기는 `trajectoids_adapter.generate_trajectoid_mesh` |
 | 새 프리셋 추가 (fixed) | `presets.py` 에 `gen_xxx` 함수 + `PresetSpec(..., (), gen_xxx)` 를 `PRESET_SPECS` 에 등록 |
 | 새 프리셋 추가 (parametric) | `gen_xxx(param=...)` + `PresetSpec(..., (Param(...),...), gen_xxx)`. UI 슬라이더는 자동 생성 |
 | 옛 프리셋 키 호환 | `presets.LEGACY_KEY_MIGRATION` 에 매핑 추가 (`scene_io` + `get_preset` 둘 다 사용) |
@@ -209,3 +225,4 @@ PySide6, numpy, scipy, scikit-image, matplotlib, pyqtgraph, PyOpenGL.
 - **공통 타임라인**: 모든 dancer 의 sim 결과는 `normalize_sim` 으로 `global_ticks`(=480) 길이로 맞춘 뒤 `phase_offset` + `speed_multiplier` 로 개별 위상/속도 조절.
 - **트랜스폼**: 렌더 시 `world = (verts @ rot.T) + translation + start_offset`. 순서를 바꾸면 회전 중심이 어긋남.
 - **Cache 무효화**: `curve_xy` 가 바뀌면(레이아웃 회전·스케일, freehand 수정, parametric 슬라이더, source 전환) `gen_result = sim_result = None` 으로 비워야 함. 레이아웃 캔버스에서는 dashed stroke + `⟳` 마크로 시각적 피드백.
+- **2주기(period-2)**: 닫힌곡선 trajectoid 의 한 주기는 **두 바퀴**다. 한 바퀴 후엔 π 회전 자세, 두 바퀴 후 원자세 복귀(`R²=I`). 굴림은 `laps = max(2, n_cycles)` 로 돌린다. 메쉬는 한 바퀴 trace 가 아니라 **2회 순회 접평면**으로 깎이므로, 같은 곡선이라도 단일주기 형상보다 작다(area≈π vs 2π). `gen_result` 캐시가 있는 옛 `.tdance` 는 재생성 전까지 단일주기 형상 유지.

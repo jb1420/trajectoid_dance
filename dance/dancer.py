@@ -16,12 +16,13 @@ from trajectoids_adapter import (
     GenerationResult,
     RollSimulationResult,
     build_roll_simulation,
-    generate_trajectoid_mesh,
+    generate_trajectoid_mesh,  # single-period; kept for open curves / fallback
     path_length,
     resample_uniform,
     smooth_path,
     validate_path,
 )
+from doubling import generate_two_period_trajectoid_mesh
 
 
 # 8-color palette (Tableau 10 minus gray + light variants), cycled for new dancers.
@@ -171,9 +172,10 @@ def generate_dancer(
         message = "\n".join(validation.errors + validation.suggestions)
         raise ValueError(message)
 
-    gen = generate_trajectoid_mesh(
+    # Closed curves are always generated as exact two-period (doubling)
+    # trajectoids: the body returns to its starting orientation every two laps.
+    gen = generate_two_period_trajectoid_mesh(
         pts,
-        require_closed=True,
         smooth_passes=1,
         resample_points=320,
         resolution=resolution,
@@ -183,9 +185,11 @@ def generate_dancer(
     cycle_pts = gen.resampled_points
     closed_cycle = np.vstack([cycle_pts, cycle_pts[0]])
     cycle_arc = float(path_length(closed_cycle))
-    n_cycles = max(1, int(dancer.n_cycles))
-    target_angle = (cycle_arc / max(core_radius, 1e-9)) * n_cycles
-    n_frames = max(240, 200 * n_cycles)
+    # One full period of a two-period trajectoid is two laps (R^2 = I), so roll
+    # at least two laps for the pose to come back to its start.
+    laps = max(2, int(dancer.n_cycles))
+    target_angle = (cycle_arc / max(core_radius, 1e-9)) * laps
+    n_frames = max(240, 200 * laps)
 
     sim = build_roll_simulation(
         cycle_pts,
