@@ -17,7 +17,10 @@ dance/
 ├── scene_io.py             # `.tdance` (zip: scene.json + arrays.npz) 직렬화 + legacy 마이그레이션
 ├── roll_test.py            # 롤링 디버그 페이지 (독립 실행)
 ├── make_examples.py        # examples/ 폴더에 시드 .tdance 생성
+├── make_trefoil_trajectoid.py  # trefoil 프리셋 → 2주기 trajectoid STL + 멀티뷰 미리보기 (독립 실행)
+├── make_printable_trajectoid.py # 3D 프린팅용 STL (중앙 쇠구슬 캐비티) 생성 CLI (독립 실행)  ← 신규
 ├── examples/               # 사전 생성된 .tdance (trio / orbit / canon / four_infinity)
+├── output/                 # 생성 산출물 (예: output/trefoil/*.stl, output/printable/<name>/*.stl) ← gitignore 권장
 ├── requirements.txt        # PySide6, numpy, scipy, scikit-image, matplotlib, pyqtgraph, PyOpenGL
 ├── ARCHITECTURE.md         # ← 이 문서
 └── __pycache__/            # gitignore 대상
@@ -52,7 +55,8 @@ dance/
 ## 파일별 역할
 
 ### `app.py` — 메인 GUI 진입점
-- `MainWindow`: 좌(roster + build/playback) / 중(`DancerEditorPanel`) / 우(viewer) 3패널 스플릿.
+- `MainWindow`: 좌(roster + mode/playback) / **스테이지** 2패널 스플릿 + 좌측 Scenes 도크.
+  - **스테이지(`QStackedWidget`)**: 에디터(`DancerEditorPanel`)와 viewer 를 **상호배타**로 담아 한 번에 하나만 표시(`self._stage`, index0=editor / index1=viewer). 덕분에 수정 모드에선 Curve/Layout 캔버스가, 실행 모드에선 3D 뷰가 패널 전체 폭을 차지.
 - `DancerEditorPanel`: **3개 탭** 구성
   - **Curve**: source 콤보(프리셋/Freehand) + `Parameters` 그룹(parametric preset 의 슬라이더, 동적 생성) + Freehand 일 때만 보이는 `Drawing tool` 팔레트(Bezier 기본) + `CurveEditorWidget` + Smooth/Resample/Clear/Generate Mesh 버튼.
   - **Motion**: Start X/Y, Phase offset, Speed, Cycles per build. **Mixed-state sentinel** (`-50.5`, `-0.05`, `0.20`, `0` → `setSpecialValueText("—")`) 로 멀티선택 시 "값이 다름" 표기.
@@ -64,9 +68,10 @@ dance/
   - 캔버스: `dancerTranslated` (드래그) → motion 핸들러로 라우팅, `dancerCurveModified` (회전·스케일) → 뷰어에서 stale mesh 제거 + dirty 처리, `selectionChanged` → roster 와 양방향 동기화 (`_suppress_roster_signal` 가드).
 - 좌측 패널
   - **Roster**: `ExtendedSelection` (멀티선택 가능). + Add / Duplicate / Remove / Clear All.
-  - **Build**: `Generate All Meshes ({n} dirty)` — `gen_result is None` 인 dancer 만 일괄 빌드. 진행률 라벨 갱신.
-  - **Playback**: duration, loop, wireframe, **shader 콤보** (`MESH_SHADERS`), **opacity 슬라이더**, Play/Stop, Reset View, Export STLs.
-- File 메뉴: New / Open / Save / Save As (`scene_io` 사용). dirty 상태 추적, close 시 confirm.
+  - **Mode (수정/실행 피벗 버튼)**: 파란 `_generate_all_btn` 하나가 **에디터↔뷰어 모드 전환을 겸함** (`_on_mode_button`). 수정 모드 라벨은 빌드 상태 따라 `Generate All Meshes`(0명, 비활성) / `▶ Run`(모두 최신) / `Generate & Run (n dirty)`(dirty 있음). 후자는 `_build_dirty` 로 일괄 빌드 후 자동으로 실행 모드 진입. 실행 모드에선 녹색 `✎ Edit` 로 바뀌어 다시 수정 모드로. 상태 갱신 = `_update_mode_button`, 뷰 전환 = `_enter_run_view`/`_enter_edit_view`(후자는 `_on_stop` 먼저).
+  - **Playback**: duration, loop, wireframe, **shader 콤보** (`MESH_SHADERS`), **opacity 슬라이더**, Play/Stop, Reset View, Export STLs. **실행 모드 = 자동 재생**: 피벗으로 실행 진입 시 `_on_play` 가 바로 시작. `Play All` 을 수정 모드에서 눌러도 `_on_play` 가 `_enter_run_view` 로 전환 후 재생.
+- **Scenes 도크** (`QDockWidget`, 좌측 도킹): `examples/*.tdance` 를 **GUI 내**에서 열고/저장(별도 파일탐색기 팝업 없이). `_build_scene_library` 가 구성 — 파일 리스트(더블클릭/Open 으로 로드, 현재 파일은 bold+선택 강조), Refresh, 파일명 입력 + Save(덮어쓰기 시 확인). `EXAMPLES_DIR = Path(__file__).parent/"examples"` 한 폴더만 탐색. `_refresh_scene_list`(스캔/강조), `_open_scene_item`(discard 가드 후 `_load_from_path`), `_save_scene_from_panel`(이름 sanitize→`_save_to_path`). load/save 흐름이 항상 리스트를 재동기화.
+- File 메뉴: New / Open / Save / Save As (`scene_io` 사용). dirty 상태 추적, close 시 confirm. **Open…/Save As… 는 이제 `examples/` 밖 파일용 폴백** (네이티브 `QFileDialog`). View 메뉴의 **Scenes** 토글로 도크 표시/숨김.
 - 진입점: `python app.py`.
 
 ### `viewer.py` — 다중 dancer 3D 뷰어
@@ -193,6 +198,30 @@ dance/
 - `examples/` 폴더에 시드 `.tdance` 파일을 만든다 (`trio`, `orbit`, `canon`, `four_infinity`).
 - 한 번 실행해 두면 앱의 Open 으로 즉시 데모 가능.
 
+### `make_trefoil_trajectoid.py` — trefoil trajectoid 생성기 (독립 실행)
+- 앱과 동일한 닫힌곡선 파이프라인(`Dancer` + `generate_dancer`, 즉 2주기 doubling)을 `trefoil` 프리셋에 적용해 산출물을 `output/trefoil/` 에 쓴다.
+  - `trefoil_trajectoid.stl` — 굴림 솔리드 (binary STL, full-res). `export_binary_stl` 사용.
+  - `trefoil_trajectoid.png` — 검증/미리보기. 좌상단에 **그린 경로 vs 굴림 궤적**(겹쳐야 정상), 나머지 5개 패널에 **여러 시점(front/side/three-quarter/top/underside)** 의 3D 메쉬.
+- 시각 규약: 높이(z) 기준 **옅은 무지개 컬러맵**(`turbo` 를 흰색 쪽으로 블렌딩한 `_pale_rainbow_cmap`) + `LightSource` 음영으로 입체감. 색 범위(`vmin/vmax`)는 전 패널 공통.
+- 진단 출력: `s*`(π-회전 스케일), 2바퀴 mismatch(≈0), 구면 endpoint gap, 정점/면 수, bbox, `effective_radius = core_radius/s*`.
+- 진입점: `python make_trefoil_trajectoid.py` (`dance/` 에서 실행). matplotlib `Agg` 백엔드라 GUI 불필요.
+
+### `make_printable_trajectoid.py` — 3D 프린팅용 STL 생성기 (독립 실행, 신규)
+실제로 굴러가는 **물리 trajectoid** 를 FDM 으로 뽑기 위한 CLI. 핵심 통찰: trajectoid 가 설계 경로대로 구르려면 **무게중심이 구 중심에 있어야** 하는데(이론은 균질 구 가정), 접평면들이 플라스틱을 비대칭으로 깎아내므로 플라스틱-only 셸은 CoM 이 치우친다. 해결책(원논문 · `ver2_PyBullet/config.py` 와 동일)은 **중앙에 밀도 높은 쇠구슬**을 박는 것 — 구슬 질량이 지배해 CoM 을 중심에 고정.
+- 그래서 trajectoid 를 **중앙 구형 캐비티가 있는 셸**로 생성:
+  `solid = {‖p‖ ≤ R_outer} ∩ {nₖ·p ≥ -R_core} \ {‖p‖ < R_cavity}` (outer 구 ∩ 접평면 컷 ∖ 구슬 포켓).
+- **경로 두 종류** (`load_curve` → `(curve, name, closed)`):
+  - **닫힌 루프**(`--preset` dance 프리셋, 기본 trefoil) → `build_normals(closed=True)` 가 **정식 period-2(doubling)** 사용: `doubling.find_pi_rotation_scale` + `_doubled_closed_path`.
+  - **열린 주기 경로**(`--periodic sinusoid|zigzag`, `--periods`/`--amp`) → `build_normals(closed=False)` 가 **단일주기**(`estimate_scale` + 1회 trace) 사용. 대칭 주기 경로는 한 주기에 자세가 자연히 복귀(mismatch≈0)해 그대로 앞으로 타일링. (`--path-file` + `--open` 으로 임의 열린 경로도 가능.)
+  - 분기 결과는 `ScaleInfo(scale, mismatch_rad, period_label)` 로 통일해 리포트에 전달.
+- **수학 코어 재사용**: 위 두 경로 모두 `trajectoids_adapter._compute_normals`/`_implicit_field`/`_field_to_mesh` 를 그대로 호출. 추가한 것은 **캐비티 항과 반쪽 분할 항**뿐.
+- `hollow_fields()`: 비싼 `_implicit_field` 를 1회만 호출해 solid 필드를 얻고, `max(solid, R_cavity−‖p‖)` 로 hollow(셸), `max(hollow, ∓z)` 로 top/bottom 반쪽 필드를 값싸게 파생. **z=0 절단면은 marching cubes 가 자동으로 평면 캡** → 각 반쪽이 watertight (boolean 불필요).
+- **물리 치수 파생** (`PrintGeometry`, 단위 mm): `--ball-mm`(구슬 지름)에서 `cavity_r = ball/2 + clearance`, `core_r = cavity_r + wall`(=알고리즘 단위 1.0 의 물리 크기 → `scale_mm`), `outer_r = core_r × shell_ratio`. 알고리즘 코어 구를 1.0 에 고정하므로 `scale_mm = core_r_mm`. **`--scale`(`size_scale`)** 은 알고리즘-단위 비율은 그대로 두고 `scale_mm`·표시 치수만 곱하는 **균일 확대**(예: 3 = 3배 인쇄).
+- **3개 모드**: `split`(기본, 두 반쪽 + 조립 참고 셸) / `inplace`(단일 폐쇄 셸, 프린트 일시정지 삽입) / `solid`(**캐비티 없이 꽉 채운** 순수 trajectoid — 균질 구가 아니라 CoM 이 치우쳐 단독으로는 정확히 안 구름. 리포트가 그 centroid 오프셋을 명시). split 의 bottom 반쪽은 X축 180° 회전 후 바닥(z=0)에 평평히 안착시켜 export.
+- **출력**: `output/printable/<name>/` 에 `<stem>_*.stl`(`stem = name` + `_x{scale}` (≠1배일 때)) — `*_half_top.stl`/`*_half_bottom.stl`/`*_assembled_ref.stl`(split) 또는 `*_shell.stl`(inplace) / `*_solid.stl`(solid) + `*_preview.png`(입력 경로 / 단면(+쇠구슬) / 외곽 셸 3D).
+- **진단 리포트**: 치수, 질량(PLA 1240 / 강철 7874 kg/m³), (캐비티 모드)구슬 질량비·**CoM 오프셋**(외경의 5% 초과 시 경고) / (solid 모드)centroid 오프셋, `ScaleInfo` scale·mismatch, watertight 여부.
+- 진입점 예: `python make_printable_trajectoid.py --preset trefoil --ball-mm 19.05` (닫힌·쇠구슬) / `--periodic sinusoid` (열린 주기·쇠구슬) / `--preset trefoil --mode solid --scale 3` (3배·솔리드). matplotlib `Agg`. 콘솔이 cp949 라도 깨지지 않게 import 시점에 stdout/stderr 를 UTF-8 로 `reconfigure`.
+
 ### `examples/` — 사전 생성된 `.tdance` 파일들
 `trio.tdance`, `orbit.tdance`, `canon.tdance`, `four_infinity.tdance`.
 
@@ -220,7 +249,11 @@ PySide6, numpy, scipy, scikit-image, matplotlib, pyqtgraph, PyOpenGL.
 | 새 프리셋 추가 (parametric) | `gen_xxx(param=...)` + `PresetSpec(..., (Param(...),...), gen_xxx)`. UI 슬라이더는 자동 생성 |
 | 옛 프리셋 키 호환 | `presets.LEGACY_KEY_MIGRATION` 에 매핑 추가 (`scene_io` + `get_preset` 둘 다 사용) |
 | 새 export 포맷 | `trajectoids_adapter.export_binary_stl` 옆에 추가 + `app._on_export_*` 훅 |
+| 3D 프린팅용 STL(쇠구슬 캐비티) | `make_printable_trajectoid.py`. 캐비티/반쪽은 `hollow_fields` 의 `max()` 항, 치수는 `PrintGeometry`. `--mode split/inplace/solid`, 크기 `--scale` |
+| 열린 주기 경로 trajectoid | `make_printable_trajectoid.py --periodic sinusoid/zigzag` (`PERIODIC_PATHS`, 단일주기 `build_normals(closed=False)`) |
 | `.tdance` 스키마 변경 | `scene_io.TDANCE_VERSION` 올리고 `_build_*`/`_reconstruct_*` 동시 수정 |
+| examples 씬을 GUI에서 열고/저장 | `app.MainWindow._build_scene_library`, `_refresh_scene_list`, `_save_scene_from_panel` (좌측 Scenes 도크) |
+| 수정/실행 모드(에디터↔뷰어) 동작 | `app.MainWindow._on_mode_button`, `_update_mode_button`, `_enter_run_view`/`_enter_edit_view`, `self._stage`(`QStackedWidget`) |
 | Curve 편집기 도구 | `curve_editor.Tool`, `CurveEditorWidget` 메서드 |
 | 멀티 dancer 타임라인 | `dancer.normalize_sim`, `viewer.GLOBAL_TICKS`, `_draw_frame` |
 | 2D 배치/회전/스케일 UX | `layout_canvas.LayoutCanvasWidget` (`_begin_*`/`_update_*` 패밀리) |

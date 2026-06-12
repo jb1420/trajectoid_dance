@@ -34,6 +34,9 @@ from trajectoids_adapter import export_binary_stl
 
 FREEHAND_OPTION = "__freehand__"
 
+# In-GUI scene library browses this folder (resolved regardless of CWD).
+EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
+
 
 def _color_swatch(hex_color: str, size: int = 14) -> QtGui.QIcon:
     pix = QtGui.QPixmap(size, size)
@@ -654,6 +657,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_file: Optional[Path] = None
         self._is_dirty: bool = False
         self._suppress_roster_signal: bool = False
+        # "edit" → editor (panel 3) shown; "run" → 3D viewer (panel 4) shown.
+        # The blue Build button (panel 2) pivots between them. The two never
+        # show together (they share one stacked stage pane).
+        self._mode: str = "edit"
         self._viewer = make_viewer(self)
 
         # ----- Left panel: Roster + global controls -----
@@ -681,12 +688,12 @@ class MainWindow(QtWidgets.QMainWindow):
             roster_buttons.addWidget(b)
         left_layout.addLayout(roster_buttons)
 
-        left_layout.addWidget(QtWidgets.QLabel("<b>Build</b>"))
+        left_layout.addWidget(QtWidgets.QLabel("<b>Mode</b>"))
         self._generate_all_btn = QtWidgets.QPushButton("Generate All Meshes")
         self._generate_all_btn.setStyleSheet(
             "font-weight: bold; padding: 8px; background-color: #2b6cb0; color: white;"
         )
-        self._generate_all_btn.clicked.connect(self._on_generate_all)
+        self._generate_all_btn.clicked.connect(self._on_mode_button)
         left_layout.addWidget(self._generate_all_btn)
 
         left_layout.addWidget(QtWidgets.QLabel("<b>Playback</b>"))
@@ -719,10 +726,15 @@ class MainWindow(QtWidgets.QMainWindow):
         left_layout.addLayout(playback_form)
 
         playback_buttons = QtWidgets.QHBoxLayout()
+        _play_style = (
+            "font-weight: bold; padding: 6px; "
+            "background-color: #2b6cb0; color: white;"
+        )
         self._play_btn = QtWidgets.QPushButton("▶ Play All")
-        self._play_btn.setStyleSheet("font-weight: bold; padding: 6px;")
+        self._play_btn.setStyleSheet(_play_style)
         self._play_btn.clicked.connect(self._on_play)
         self._stop_btn = QtWidgets.QPushButton("■ Stop")
+        self._stop_btn.setStyleSheet(_play_style)
         self._stop_btn.clicked.connect(self._on_stop)
         self._stop_btn.setEnabled(False)
         reset_btn = QtWidgets.QPushButton("Reset View")
@@ -745,23 +757,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._editor.nameChanged.connect(lambda _: self._mark_dirty())
         self._editor.colorChanged.connect(lambda _: self._mark_dirty())
         # Source/curve changes can invalidate gen_result → refresh dirty counter.
-        self._editor.dancerChanged.connect(lambda _: self._update_generate_all_label())
+        self._editor.dancerChanged.connect(lambda _: self._update_mode_button())
 
         # Layout canvas → main-window plumbing
         self._editor.canvas.dancerTranslated.connect(self._on_canvas_translated)
         self._editor.canvas.dancerCurveModified.connect(self._on_canvas_curve_modified)
         self._editor.canvas.selectionChanged.connect(self._on_canvas_selection)
 
+        # ----- Stage: editor (edit mode) / viewer (run mode), one at a time -----
+        # A QStackedWidget keeps panels 3 & 4 mutually exclusive: edit mode gives
+        # the editor's Curve/Layout canvases full room; run mode gives the viewer
+        # full room. The blue Build button (panel 2) switches the page.
+        self._stage = QtWidgets.QStackedWidget()
+        self._stage.addWidget(self._editor)  # index 0 → edit
+        self._stage.addWidget(self._viewer)  # index 1 → run
+
         # ----- Splitter -----
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         splitter.addWidget(left)
-        splitter.addWidget(self._editor)
-        splitter.addWidget(self._viewer)
+        splitter.addWidget(self._stage)
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 2)
-        splitter.setSizes([320, 380, 700])
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([320, 1000])
         self.setCentralWidget(splitter)
+
+        # ----- Scenes dock: in-GUI .tdance browser/saver (replaces popup) -----
+        self._build_scene_library()
 
         # Status bar
         self._status = self.statusBar()
@@ -772,8 +793,105 @@ class MainWindow(QtWidgets.QMainWindow):
             self._viewer.playFinished.connect(self._on_play_finished)
 
         self._build_menu()
-        # Initial state: empty scene → button shows "Generate All Meshes" disabled.
-        self._update_generate_all_label()
+        # Populate the scenes dock with examples/*.tdance.
+        self._refresh_scene_list()
+        # Start in edit mode (editor visible, viewer hidden) and settle the
+        # blue Build/Run button label.
+        self._enter_edit_view()
+
+    # -- scenes dock ---------------------------------------------------------
+
+    def _build_scene_library(self) -> None:
+        """In-GUI browser/saver for examples/*.tdance (left dock, no popup)."""
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(QtWidgets.QLabel("<b>Scenes (examples/)</b>"))
+
+        self._scene_list = QtWidgets.QListWidget()
+        self._scene_list.itemDoubleClicked.connect(self._open_scene_item)
+        layout.addWidget(self._scene_list, stretch=1)
+
+        open_row = QtWidgets.QHBoxLayout()
+        open_btn = QtWidgets.QPushButton("Open")
+        open_btn.clicked.connect(self._open_selected_scene)
+        refresh_btn = QtWidgets.QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._refresh_scene_list)
+        open_row.addWidget(open_btn)
+        open_row.addWidget(refresh_btn)
+        layout.addLayout(open_row)
+
+        save_row = QtWidgets.QHBoxLayout()
+        self._scene_name_edit = QtWidgets.QLineEdit()
+        self._scene_name_edit.setPlaceholderText("scene name")
+        self._scene_name_edit.returnPressed.connect(self._save_scene_from_panel)
+        save_btn = QtWidgets.QPushButton("Save")
+        save_btn.clicked.connect(self._save_scene_from_panel)
+        save_row.addWidget(self._scene_name_edit, stretch=1)
+        save_row.addWidget(save_btn)
+        layout.addLayout(save_row)
+
+        dock = QtWidgets.QDockWidget("Scenes", self)
+        dock.setObjectName("ScenesDock")
+        dock.setAllowedAreas(
+            QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+            | QtCore.Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        dock.setWidget(panel)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        self._scene_dock = dock
+
+    def _refresh_scene_list(self) -> None:
+        self._scene_list.clear()
+        if not EXAMPLES_DIR.is_dir():
+            return
+        current = str(self._current_file) if self._current_file else None
+        for path in sorted(EXAMPLES_DIR.glob("*.tdance")):
+            item = QtWidgets.QListWidgetItem(path.stem)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, str(path))
+            self._scene_list.addItem(item)
+            if current and os.path.normcase(str(path)) == os.path.normcase(current):
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                self._scene_list.setCurrentItem(item)
+
+    def _open_scene_item(self, item: QtWidgets.QListWidgetItem) -> None:
+        path = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        if not self._confirm_discard_changes():
+            return
+        self._load_from_path(Path(path))
+
+    def _open_selected_scene(self) -> None:
+        item = self._scene_list.currentItem()
+        if item is None:
+            self._status.showMessage("Select a scene to open.")
+            return
+        self._open_scene_item(item)
+
+    def _save_scene_from_panel(self) -> None:
+        name = self._scene_name_edit.text().strip()
+        if not name:
+            self._status.showMessage("Enter a scene name.")
+            return
+        if not name.lower().endswith(".tdance"):
+            name += ".tdance"
+        path = EXAMPLES_DIR / name
+        EXAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Overwrite Scene",
+                f'"{path.name}" already exists.\nOverwrite it?',
+                QtWidgets.QMessageBox.StandardButton.Yes |
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+        self._save_to_path(path)
+        self._refresh_scene_list()
 
     # -- menu ----------------------------------------------------------------
 
@@ -802,6 +920,11 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(act_save)
         file_menu.addAction(act_save_as)
+
+        view_menu = menu_bar.addMenu("&View")
+        toggle_scenes = self._scene_dock.toggleViewAction()
+        toggle_scenes.setText("&Scenes")
+        view_menu.addAction(toggle_scenes)
 
     # -- dirty state ---------------------------------------------------------
 
@@ -893,6 +1016,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._current_file = path
         self._mark_clean()
+        self._refresh_scene_list()
         self._status.showMessage(f"Saved to {path.name}.")
 
     def _load_from_path(self, path: Path) -> None:
@@ -911,6 +1035,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._loop_check.setChecked(self._scene.loop)
         self._current_file = path
         self._mark_clean()
+        self._scene_name_edit.setText(path.stem)
+        self._refresh_scene_list()
+        # Land in edit mode (stops any stale playback; ▶ Run is one click away).
+        self._enter_edit_view()
         self._status.showMessage(f"Opened {path.name} — {len(self._scene.dancers)} dancer(s).")
 
     # -- roster operations ---------------------------------------------------
@@ -988,7 +1116,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Keep the layout canvas in sync with the full scene roster
         # (per-dancer selection is handled separately via set_selection).
         self._editor.canvas.set_dancers(self._scene.dancers)
-        self._update_generate_all_label()
+        self._update_mode_button()
 
     def _current_dancer(self) -> Optional[Dancer]:
         row = self._roster.currentRow()
@@ -1030,7 +1158,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # stale mesh from the viewer so the user sees they must regenerate.
         self._viewer.remove_dancer(dancer_id)
         self._editor.refresh_info()
-        self._update_generate_all_label()
+        self._update_mode_button()
         self._mark_dirty()
 
     def _on_canvas_selection(self, ids: list) -> None:
@@ -1109,7 +1237,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # gen_result is now populated → canvas redraws this dancer's curve
         # with a solid (not dashed) stroke.
         self._editor.canvas.refresh()
-        self._update_generate_all_label()
+        self._update_mode_button()
         self._mark_dirty()
         self._status.showMessage(
             f"Generated {d.name}: {d.gen_result.faces.shape[0]} faces."
@@ -1133,6 +1261,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Add a dancer and click Generate Mesh first."
             )
             return
+        # Playing implies run mode — make sure the viewer (panel 4) is showing.
+        if self._mode != "run":
+            self._enter_run_view()
         duration = float(self._duration_spin.value())
         loop = self._loop_check.isChecked()
         if self._viewer.start_play(duration, loop=loop):
@@ -1151,29 +1282,69 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_btn.setEnabled(False)
         self._status.showMessage("Playback finished.")
 
-    # -- batch generate ------------------------------------------------------
+    # -- edit / run mode -----------------------------------------------------
+
+    _EDIT_STYLE = "font-weight: bold; padding: 8px; background-color: #2b6cb0; color: white;"
+    _RUN_STYLE = "font-weight: bold; padding: 8px; background-color: #2f855a; color: white;"
 
     def _dirty_dancers(self) -> list[Dancer]:
         """Dancers whose cached mesh is stale (or never generated)."""
         return [d for d in self._scene.dancers if d.gen_result is None]
 
-    def _update_generate_all_label(self) -> None:
+    def _update_mode_button(self) -> None:
+        """Refresh the pivot button to reflect the current mode + build state."""
+        btn = self._generate_all_btn
+        if self._mode == "run":
+            btn.setStyleSheet(self._RUN_STYLE)
+            btn.setText("✎ Edit")
+            btn.setEnabled(True)
+            return
+        # edit mode
+        btn.setStyleSheet(self._EDIT_STYLE)
         n_dirty = len(self._dirty_dancers())
         total = len(self._scene.dancers)
         if total == 0:
-            self._generate_all_btn.setText("Generate All Meshes")
-            self._generate_all_btn.setEnabled(False)
+            btn.setText("Generate All Meshes")
+            btn.setEnabled(False)
         elif n_dirty == 0:
-            self._generate_all_btn.setText("All meshes up to date")
-            self._generate_all_btn.setEnabled(False)
+            btn.setText("▶ Run")
+            btn.setEnabled(True)
         else:
-            self._generate_all_btn.setText(f"Generate All Meshes  ({n_dirty} dirty)")
-            self._generate_all_btn.setEnabled(True)
+            btn.setText(f"Generate & Run  ({n_dirty} dirty)")
+            btn.setEnabled(True)
 
-    def _on_generate_all(self) -> None:
-        dirty = self._dirty_dancers()
-        if not dirty:
+    def _enter_run_view(self) -> None:
+        """Show the 3D viewer (panel 4); hide the editor (panel 3)."""
+        self._mode = "run"
+        self._stage.setCurrentWidget(self._viewer)
+        self._update_mode_button()
+
+    def _enter_edit_view(self) -> None:
+        """Show the editor (panel 3); hide the 3D viewer (panel 4)."""
+        self._on_stop()
+        self._mode = "edit"
+        self._stage.setCurrentWidget(self._editor)
+        self._update_mode_button()
+
+    def _on_mode_button(self) -> None:
+        """Blue pivot button: build-if-needed → run, or run → back to edit."""
+        if self._mode == "run":
+            self._enter_edit_view()
             return
+        # edit mode → build any dirty meshes, then run (auto-plays via _on_play).
+        if not self._scene.dancers:
+            return
+        dirty = self._dirty_dancers()
+        if dirty:
+            self._build_dirty(dirty)
+            if self._dirty_dancers():
+                # Some builds failed (warning already shown) — stay in edit.
+                self._update_mode_button()
+                return
+        self._on_play()
+
+    def _build_dirty(self, dirty: list[Dancer]) -> None:
+        """Generate meshes for all stale dancers, with progress on the button."""
         total = len(dirty)
         # Disable the button during the batch so the user can't double-click.
         self._generate_all_btn.setEnabled(False)
@@ -1183,9 +1354,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._generate_all_btn.setText(f"Generating {i}/{total}…")
             QtWidgets.QApplication.processEvents()
             self._on_generate_requested(d.dancer_id)
-        # _on_generate_requested already calls _update_generate_all_label, but
+        # _on_generate_requested already calls _update_mode_button, but
         # call it once more to settle the final state cleanly.
-        self._update_generate_all_label()
+        self._update_mode_button()
 
     # -- export --------------------------------------------------------------
 
